@@ -427,18 +427,12 @@ func Test_EncodeCommitmentState(t *testing.T) {
 }
 
 func Test_BtreeIndex(t *testing.T) {
-	bt := newBtAlloc(32, 4)
+	count := uint64(100000)
+	bt := newBtAlloc(count, 1024)
+	//keys := make([][]byte, count)
 
-	bt.walkFillorder()
-	bt.init()
-	for {
-		c := bt.pick()
-		if c == 0 {
-			break
-		}
-		fmt.Printf("pick %d\n", c)
+	//bt.markupTraverse()
 
-	}
-
+	bt.traverse()
 	_ = bt
 }

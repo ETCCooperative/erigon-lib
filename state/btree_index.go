@@ -55,13 +55,11 @@ func isEven(n uint64) bool {
 }
 
 type btAlloc struct {
-	vx   []uint64
-	bros []uint64
-	pos  []int
-	pl   uint64
-	sons [][]uint64
-	d    uint64
-	M    uint64
+	d       uint64     // depth
+	M       uint64     // child limit of any node
+	vx      []uint64   // vertex count on level
+	sons    [][]uint64 // i - level; 0 <= i < d; j_k - amount, j_k+1 - child count
+	cursors []cur
 }
 
 func logBase(n, base uint64) uint64 {
@@ -70,12 +68,6 @@ func logBase(n, base uint64) uint64 {
 
 func min64(a, b uint64) uint64 {
 	if a < b {
-		return a
-	}
-	return b
-}
-func max64(a, b uint64) uint64 {
-	if a > b {
 		return a
 	}
 	return b
@@ -89,10 +81,10 @@ func newBtAlloc(k, M uint64) *btAlloc {
 
 	fmt.Printf("k=%d d=%d, M=%d m=%d\n", k, d, M, m)
 	a := &btAlloc{
-		vx:   make([]uint64, d+1),
-		sons: make([][]uint64, d+1),
-		bros: make([]uint64, d),
-		M:    M, d: d,
+		vx:      make([]uint64, d+1),
+		sons:    make([][]uint64, d+1),
+		cursors: make([]cur, d),
+		M:       M, d: d,
 	}
 	a.vx[0] = 1
 	a.vx[d] = ks
@@ -114,7 +106,7 @@ func newBtAlloc(k, M uint64) *btAlloc {
 	pnv := uint64(0)
 	for l := a.d - 1; l > 0; l-- {
 		s := nnc(a.vx[l+1])
-		lnc := uint64(0)
+		ncount := uint64(0)
 		left := a.vx[l+1] % M
 		if pnv != 0 {
 			s = nnc(pnv)
@@ -131,13 +123,10 @@ func newBtAlloc(k, M uint64) *btAlloc {
 			}
 		}
 		a.sons[l] = append(a.sons[l], s, M)
-
 		for i := 0; i < len(a.sons[l]); i += 2 {
-			lnc += a.sons[l][i]
+			ncount += a.sons[l][i]
 		}
-		pnv = lnc
-
-		fmt.Printf("parents %d left %d\n", s, lnc)
+		pnv = ncount
 
 	}
 	a.sons[0] = []uint64{1, pnv}
@@ -149,91 +138,93 @@ func newBtAlloc(k, M uint64) *btAlloc {
 	return a
 }
 
-func (a *btAlloc) init() {
-	a.bros = make([]uint64, a.d)
-	a.pos = make([]int, a.d)
-	a.pl = a.d - 1
-	for i := 0; i < int(a.d); i++ {
-		a.bros[i] = a.sons[i][1]
-		a.pos[i] = 1
-	}
+type cur struct {
+	l, p, di, si uint64
+
+	//l - level
+	//p - pos inside level
+	//si - current, actual son index
+	//di - data array index
 }
 
-//wip
-func (a *btAlloc) pick() uint64 {
-	for {
-		if a.bros[a.pl] == 0 {
-			a.pos[a.pl] += 2
-			if len(a.sons[a.pl]) > a.pos[a.pl] {
-				a.pos[a.pl] = -1 // кончились ноды на уровне
-				continue
-			}
-			a.bros[a.pl] = a.sons[a.pl][a.pos[a.pl]]
-			a.pl--
-			return 1
-			//break
+func (a *btAlloc) traverse() {
+	var sum uint64
+	for l := 0; l < len(a.sons)-1; l++ {
+		if len(a.sons[l]) < 2 {
+			panic("invalid btree allocation markup")
 		}
+		a.cursors[l] = cur{uint64(l), 1, 0, 0}
 
-		b := a.bros[a.pl]
-		a.bros[a.pl] = 0
-		return b
-	}
-	return 0
-}
-
-func (a *btAlloc) walkFillorder() {
-	stack := make([]string, 0)
-	var sp uint64
-	p := -1  // parent ptr
-	bl := -1 // bros left
-
-	for l := len(a.sons) - 2; l >= 0; {
 		for i := 0; i < len(a.sons[l]); i += 2 {
-			nodes, ccount := a.sons[l][i], a.sons[l][i+1]
-			for n := uint64(0); n < nodes; n++ {
-				for j := uint64(0); j < ccount; j++ {
-					stack = append(stack, fmt.Sprintf("L%d x%2d", l, sp))
-					fmt.Printf("%s\n", stack[sp])
-					sp++
-				}
-				stack = append(stack, fmt.Sprintf("L%d c%2d x%2d", l-1, ccount, sp))
-				fmt.Printf("%s\n", stack[sp])
-				sp++
+			sum += a.sons[l][i] * a.sons[l][i+1]
+		}
+	}
+	fmt.Printf("nodes total %d\n", sum)
 
-				if l == 0 {
-					continue
-				}
-				if p < 0 && bl < 0 {
-					p = 0 // even root should have this item
-					bros := a.sons[l-1][p+1]
-					bl = int(bros)
-				}
-				bl--
-				// ненадежный отсчет оставшихся братишек
-				if bl != int(a.sons[l-1][p+1])-1 && bl > 0 {
-					continue // skip previously marked parent
-				}
-				if bl <= 0 {
-					p += 2
-					if p >= len(a.sons[l-1]) {
-						break
-					}
-					bros := a.sons[l-1][p+1]
-					bl = int(bros)
-				}
-				stack = append(stack, fmt.Sprintf("L%d p%2d x%2d", l-1, p, sp))
-				fmt.Printf("%s\n", stack[sp])
-				sp++
+	c := a.cursors[len(a.cursors)-1]
 
+	var di uint64
+	for stop := false; !stop; {
+		bros := a.sons[c.l][c.p]
+		parents := a.sons[c.l][c.p-1]
+
+		// fill leaves, mark parent if needed (until all grandparents not marked up until root)
+		// check if eldest parent has brothers
+		//     -- has bros -> fill their leaves from the bottom
+		//     -- no bros  -> shift cursor (tricky)
+
+		for i := uint64(0); i < bros; i++ {
+			c.si++
+			c.di = di
+			di++
+			fmt.Printf("L{%d,%d| d %d s %d}\n", c.l, c.p, c.di, c.si)
+		}
+
+		pid := c.si / bros
+		if pid >= parents {
+			if c.p+2 >= uint64(len(a.sons[c.l])) {
+				stop = true // end of row
+			}
+			fmt.Printf("N %d d%d s%d\n", c.l, c.di, c.si)
+			c.p += 2
+			c.si = 1
+			a.cursors[c.l] = c
+		}
+
+		for l := len(a.cursors) - 2; l >= 0; l-- {
+			pc := a.cursors[l]
+			uncles := a.sons[pc.l][pc.p]
+			grands := a.sons[pc.l][pc.p-1]
+
+			pi1 := pc.si / uncles
+			pc.si++
+			pi2 := pc.si / uncles
+
+			pc.di = di
+			di++
+
+			if pi2 >= grands {
+				if pc.p+2 >= uint64(len(a.sons[pc.l])) {
+					// end of row
+					break
+				}
+				fmt.Printf("N %d d%d s%d\n", pc.l, pc.di, pc.si)
+				pc.p += 2
+				pc.si = 1
+				pc.di = di
+			}
+			a.cursors[pc.l] = pc
+
+			fmt.Printf("P{%d,%d| %d s=%d} pid %d\n", pc.l, pc.p, pc.di, pc.si, pid)
+
+			if pc.si > 1 && pi2-pi1 == 0 {
+				break
 			}
 		}
-		l -= 2 // parent row already filled by row below
-	}
 
-	//for _, s := range stack {
-	//	fmt.Printf("%s\n", s)
-	//}
+	}
 }
+
 
 func OpenBtreeIndex(indexPath string) (*BtIndex, error) {
 	s, err := os.Stat(indexPath)
