@@ -83,6 +83,16 @@ type Config struct {
 
 	EIP158Block *big.Int `json:"eip158Block,omitempty"` // EIP158 HF block
 
+	// Ethereum Classic (ETC) fork blocks
+	ECIP1010Block        *big.Int `json:"ecip1010Block,omitempty"`        // ECIP1010 switch block (nil = no fork, 0 = already activated)
+	ECIP1010DisableBlock *big.Int `json:"ecip1010DisableBlock,omitempty"` // ECIP1010 switch DISABLE block (nil = no fork, 0 = already activated); The ECIP defines a 2M bomb delay.
+	ECIP1017Block        *big.Int `json:"ecip1017Block,omitempty"`        // ECIP1017 switch block (nil = no fork, 0 = already activated)
+	ECIP1041Block        *big.Int `json:"ecip1041Block,omitempty"`        // ECIP1041 switch block (nil = no fork, 0 = already activated)
+	ECIP1099Block        *big.Int `json:"ecip1099Block,omitempty"`        // ECIP1099 switch block (nil = no fork, 0 = already activated)
+	ClassicEIP155Block   *big.Int `json:"classicEIP155,omitempty"`        // Classic EIP155 switch block (nil = no fork, 0 = already activated)
+	ClassicEIP160Block   *big.Int `json:"classicEIP160,omitempty"`        // Classic EIP160 switch block (nil = no fork, 0 = already activated)
+	ClassicMystiqueBlock *big.Int `json:"classicMystique,omitempty"`      // Classic Mystique switch block (nil = no fork, 0 = already activated)
+
 	// Various consensus engines
 	Ethash *EthashConfig `json:"ethash,omitempty"`
 	Clique *CliqueConfig `json:"clique,omitempty"`
@@ -649,6 +659,9 @@ type Rules struct {
 	IsEip1559FeeCollector                                   bool
 	IsParlia, IsStarknet, IsAura                            bool
 	IsEIP150, IsEIP155, IsEIP158                            bool
+
+	// IsDieHard and IsMystique are Ethereum Classic-specific fork switches
+	IsDieHard, IsMystique bool
 }
 
 // Rules ensures c's ChainID is not nil and returns a new Rules instance
@@ -679,6 +692,9 @@ func (c *Config) Rules(num uint64, time uint64) *Rules {
 		IsEIP150:              c.IsTangerineWhistle(num),
 		IsEIP155:              c.IsSpuriousDragon(num),
 		IsEIP158:              isForked(c.EIP158Block, num),
+
+		IsDieHard:  c.IsClassic() && isForked(c.ClassicEIP160Block, num),
+		IsMystique: c.IsClassic() && isForked(c.ClassicMystiqueBlock, num),
 	}
 }
 
