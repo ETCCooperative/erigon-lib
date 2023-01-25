@@ -19,6 +19,7 @@ package state
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	math2 "math"
 	"runtime"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/RoaringBitmap/roaring/roaring64"
 	"github.com/ledgerwatch/erigon-lib/common/dbg"
+	"github.com/ledgerwatch/erigon-lib/kv/order"
 	"github.com/ledgerwatch/log/v3"
 	"go.uber.org/atomic"
 	"golang.org/x/sync/errgroup"
@@ -66,7 +68,7 @@ type AggregatorV3 struct {
 	ctxCancel              context.CancelFunc
 }
 
-func NewAggregator22(ctx context.Context, dir, tmpdir string, aggregationStep uint64, db kv.RoDB) (*AggregatorV3, error) {
+func NewAggregatorV3(ctx context.Context, dir, tmpdir string, aggregationStep uint64, db kv.RoDB) (*AggregatorV3, error) {
 	ctx, ctxCancel := context.WithCancel(ctx)
 	a := &AggregatorV3{ctx: ctx, ctxCancel: ctxCancel, dir: dir, tmpdir: tmpdir, aggregationStep: aggregationStep, backgroundResult: &BackgroundResult{}, db: db, keepInDB: 2 * aggregationStep}
 	return a, nil
@@ -236,7 +238,7 @@ func (a *AggregatorV3) SetTxNum(txNum uint64) {
 	a.tracesTo.SetTxNum(txNum)
 }
 
-type Agg22Collation struct {
+type AggV3Collation struct {
 	logAddrs   map[string]*roaring64.Bitmap
 	logTopics  map[string]*roaring64.Bitmap
 	tracesFrom map[string]*roaring64.Bitmap
@@ -246,7 +248,7 @@ type Agg22Collation struct {
 	code       HistoryCollation
 }
 
-func (c Agg22Collation) Close() {
+func (c AggV3Collation) Close() {
 	c.accounts.Close()
 	c.storage.Close()
 	c.code.Close()
@@ -272,7 +274,7 @@ func (a *AggregatorV3) buildFiles(ctx context.Context, step uint64, txFrom, txTo
 		log.Info(fmt.Sprintf("[snapshot] build %d-%d", step, step+1), "took", time.Since(t))
 	}(time.Now())
 	var sf Agg22StaticFiles
-	var ac Agg22Collation
+	var ac AggV3Collation
 	closeColl := true
 	defer func() {
 		if closeColl {
@@ -443,7 +445,9 @@ func (a *AggregatorV3) BuildFiles(ctx context.Context, db kv.RoDB) (err error) {
 	step := a.EndTxNumMinimax() / a.aggregationStep
 	for ; step < lastIdInDB(db, a.accounts.indexKeysTable)/a.aggregationStep; step++ {
 		if err := a.buildFilesInBackground(ctx, step, db); err != nil {
-			log.Warn("buildFilesInBackground", "err", err)
+			if !errors.Is(err, context.Canceled) {
+				log.Warn("buildFilesInBackground", "err", err)
+			}
 			break
 		}
 	}
@@ -555,7 +559,7 @@ func (a *AggregatorV3) Unwind(ctx context.Context, txUnwindTo uint64, stateLoad 
 	return nil
 }
 
-func (a *AggregatorV3) Warmup(txFrom, limit uint64) {
+func (a *AggregatorV3) Warmup(ctx context.Context, txFrom, limit uint64) {
 	if a.db == nil {
 		return
 	}
@@ -568,14 +572,14 @@ func (a *AggregatorV3) Warmup(txFrom, limit uint64) {
 	a.warmupWorking.Store(true)
 	go func() {
 		defer a.warmupWorking.Store(false)
-		if err := a.db.View(context.Background(), func(tx kv.Tx) error {
-			if err := a.accounts.warmup(txFrom, limit, tx); err != nil {
+		if err := a.db.View(ctx, func(tx kv.Tx) error {
+			if err := a.accounts.warmup(ctx, txFrom, limit, tx); err != nil {
 				return err
 			}
-			if err := a.storage.warmup(txFrom, limit, tx); err != nil {
+			if err := a.storage.warmup(ctx, txFrom, limit, tx); err != nil {
 				return err
 			}
-			if err := a.code.warmup(txFrom, limit, tx); err != nil {
+			if err := a.code.warmup(ctx, txFrom, limit, tx); err != nil {
 				return err
 			}
 			if err := a.logAddrs.warmup(txFrom, limit, tx); err != nil {
@@ -676,7 +680,11 @@ func (a *AggregatorV3) PruneWithTiemout(ctx context.Context, timeout time.Durati
 }
 
 func (a *AggregatorV3) Prune(ctx context.Context, limit uint64) error {
-	a.Warmup(0, cmp.Max(a.aggregationStep, limit)) // warmup is asyn and moving faster than data deletion
+	//ctx, cancel := context.WithCancel(ctx)
+	//defer cancel()
+	//go func() {
+	//	a.Warmup(ctx, 0, cmp.Max(a.aggregationStep, limit)) // warmup is asyn and moving faster than data deletion
+	//}()
 	return a.prune(ctx, 0, a.maxTxNum.Load(), limit)
 }
 
@@ -768,7 +776,7 @@ func (a *AggregatorV3) recalcMaxTxNum() {
 	a.maxTxNum.Store(min)
 }
 
-type Ranges22 struct {
+type RangesV3 struct {
 	accounts             HistoryRanges
 	storage              HistoryRanges
 	code                 HistoryRanges
@@ -786,12 +794,12 @@ type Ranges22 struct {
 	tracesTo             bool
 }
 
-func (r Ranges22) any() bool {
+func (r RangesV3) any() bool {
 	return r.accounts.any() || r.storage.any() || r.code.any() || r.logAddrs || r.logTopics || r.tracesFrom || r.tracesTo
 }
 
-func (a *AggregatorV3) findMergeRange(maxEndTxNum, maxSpan uint64) Ranges22 {
-	var r Ranges22
+func (a *AggregatorV3) findMergeRange(maxEndTxNum, maxSpan uint64) RangesV3 {
+	var r RangesV3
 	r.accounts = a.accounts.findMergeRange(maxEndTxNum, maxSpan)
 	r.storage = a.storage.findMergeRange(maxEndTxNum, maxSpan)
 	r.code = a.code.findMergeRange(maxEndTxNum, maxSpan)
@@ -803,7 +811,7 @@ func (a *AggregatorV3) findMergeRange(maxEndTxNum, maxSpan uint64) Ranges22 {
 	return r
 }
 
-type SelectedStaticFiles22 struct {
+type SelectedStaticFilesV3 struct {
 	logTopics    []*filesItem
 	accountsHist []*filesItem
 	tracesTo     []*filesItem
@@ -823,7 +831,7 @@ type SelectedStaticFiles22 struct {
 	tracesToI    int
 }
 
-func (sf SelectedStaticFiles22) Close() {
+func (sf SelectedStaticFilesV3) Close() {
 	for _, group := range [][]*filesItem{sf.accountsIdx, sf.accountsHist, sf.storageIdx, sf.accountsHist, sf.codeIdx, sf.codeHist,
 		sf.logAddrs, sf.logTopics, sf.tracesFrom, sf.tracesTo} {
 		for _, item := range group {
@@ -839,8 +847,8 @@ func (sf SelectedStaticFiles22) Close() {
 	}
 }
 
-func (a *AggregatorV3) staticFilesInRange(r Ranges22) SelectedStaticFiles22 {
-	var sf SelectedStaticFiles22
+func (a *AggregatorV3) staticFilesInRange(r RangesV3) SelectedStaticFilesV3 {
+	var sf SelectedStaticFilesV3
 	if r.accounts.any() {
 		sf.accountsIdx, sf.accountsHist, sf.accountsI = a.accounts.staticFilesInRange(r.accounts)
 	}
@@ -865,7 +873,7 @@ func (a *AggregatorV3) staticFilesInRange(r Ranges22) SelectedStaticFiles22 {
 	return sf
 }
 
-type MergedFiles22 struct {
+type MergedFilesV3 struct {
 	accountsIdx, accountsHist *filesItem
 	storageIdx, storageHist   *filesItem
 	codeIdx, codeHist         *filesItem
@@ -875,7 +883,7 @@ type MergedFiles22 struct {
 	tracesTo                  *filesItem
 }
 
-func (mf MergedFiles22) Close() {
+func (mf MergedFilesV3) Close() {
 	for _, item := range []*filesItem{mf.accountsIdx, mf.accountsHist, mf.storageIdx, mf.storageHist, mf.codeIdx, mf.codeHist,
 		mf.logAddrs, mf.logTopics, mf.tracesFrom, mf.tracesTo} {
 		if item != nil {
@@ -889,8 +897,8 @@ func (mf MergedFiles22) Close() {
 	}
 }
 
-func (a *AggregatorV3) mergeFiles(ctx context.Context, files SelectedStaticFiles22, r Ranges22, maxSpan uint64, workers int) (MergedFiles22, error) {
-	var mf MergedFiles22
+func (a *AggregatorV3) mergeFiles(ctx context.Context, files SelectedStaticFilesV3, r RangesV3, maxSpan uint64, workers int) (MergedFilesV3, error) {
+	var mf MergedFilesV3
 	closeFiles := true
 	defer func() {
 		if closeFiles {
@@ -977,7 +985,7 @@ func (a *AggregatorV3) mergeFiles(ctx context.Context, files SelectedStaticFiles
 	return mf, lastError
 }
 
-func (a *AggregatorV3) integrateMergedFiles(outs SelectedStaticFiles22, in MergedFiles22) {
+func (a *AggregatorV3) integrateMergedFiles(outs SelectedStaticFilesV3, in MergedFilesV3) {
 	a.accounts.integrateMergedFiles(outs.accountsIdx, outs.accountsHist, in.accountsIdx, in.accountsHist)
 	a.storage.integrateMergedFiles(outs.storageIdx, outs.storageHist, in.storageIdx, in.storageHist)
 	a.code.integrateMergedFiles(outs.codeIdx, outs.codeHist, in.codeIdx, in.codeHist)
@@ -987,7 +995,7 @@ func (a *AggregatorV3) integrateMergedFiles(outs SelectedStaticFiles22, in Merge
 	a.tracesTo.integrateMergedFiles(outs.tracesTo, in.tracesTo)
 }
 
-func (a *AggregatorV3) deleteFiles(outs SelectedStaticFiles22) error {
+func (a *AggregatorV3) deleteFiles(outs SelectedStaticFilesV3) error {
 	if err := a.accounts.deleteFiles(outs.accountsIdx, outs.accountsHist); err != nil {
 		return err
 	}
@@ -1151,31 +1159,31 @@ func (a *AggregatorV3) EnableMadvNormal() *AggregatorV3 {
 	return a
 }
 
-func (ac *Aggregator22Context) LogAddrIterator(addr []byte, startTxNum, endTxNum uint64, roTx kv.Tx) *InvertedIterator {
-	return ac.logAddrs.IterateRange(addr, startTxNum, endTxNum, roTx)
+func (ac *AggregatorV3Context) LogAddrIterator(addr []byte, startTxNum, endTxNum uint64, asc order.By, limit int, roTx kv.Tx) (*InvertedIterator, error) {
+	return ac.logAddrs.IterateRange(addr, startTxNum, endTxNum, asc, limit, roTx)
 }
 
-func (ac *Aggregator22Context) LogTopicIterator(topic []byte, startTxNum, endTxNum uint64, roTx kv.Tx) *InvertedIterator {
-	return ac.logTopics.IterateRange(topic, startTxNum, endTxNum, roTx)
+func (ac *AggregatorV3Context) LogTopicIterator(topic []byte, startTxNum, endTxNum uint64, asc order.By, limit int, roTx kv.Tx) (*InvertedIterator, error) {
+	return ac.logTopics.IterateRange(topic, startTxNum, endTxNum, asc, limit, roTx)
 }
 
-func (ac *Aggregator22Context) TraceFromIterator(addr []byte, startTxNum, endTxNum uint64, roTx kv.Tx) *InvertedIterator {
-	return ac.tracesFrom.IterateRange(addr, startTxNum, endTxNum, roTx)
+func (ac *AggregatorV3Context) TraceFromIterator(addr []byte, startTxNum, endTxNum uint64, asc order.By, limit int, roTx kv.Tx) (*InvertedIterator, error) {
+	return ac.tracesFrom.IterateRange(addr, startTxNum, endTxNum, asc, limit, roTx)
 }
 
-func (ac *Aggregator22Context) TraceToIterator(addr []byte, startTxNum, endTxNum uint64, roTx kv.Tx) *InvertedIterator {
-	return ac.tracesTo.IterateRange(addr, startTxNum, endTxNum, roTx)
+func (ac *AggregatorV3Context) TraceToIterator(addr []byte, startTxNum, endTxNum uint64, asc order.By, limit int, roTx kv.Tx) (*InvertedIterator, error) {
+	return ac.tracesTo.IterateRange(addr, startTxNum, endTxNum, asc, limit, roTx)
 }
 
-func (ac *Aggregator22Context) ReadAccountDataNoStateWithRecent(addr []byte, txNum uint64) ([]byte, bool, error) {
+func (ac *AggregatorV3Context) ReadAccountDataNoStateWithRecent(addr []byte, txNum uint64) ([]byte, bool, error) {
 	return ac.accounts.GetNoStateWithRecent(addr, txNum, ac.tx)
 }
 
-func (ac *Aggregator22Context) ReadAccountDataNoState(addr []byte, txNum uint64) ([]byte, bool, error) {
+func (ac *AggregatorV3Context) ReadAccountDataNoState(addr []byte, txNum uint64) ([]byte, bool, error) {
 	return ac.accounts.GetNoState(addr, txNum)
 }
 
-func (ac *Aggregator22Context) ReadAccountStorageNoStateWithRecent(addr []byte, loc []byte, txNum uint64) ([]byte, bool, error) {
+func (ac *AggregatorV3Context) ReadAccountStorageNoStateWithRecent(addr []byte, loc []byte, txNum uint64) ([]byte, bool, error) {
 	if cap(ac.keyBuf) < len(addr)+len(loc) {
 		ac.keyBuf = make([]byte, len(addr)+len(loc))
 	} else if len(ac.keyBuf) != len(addr)+len(loc) {
@@ -1185,11 +1193,11 @@ func (ac *Aggregator22Context) ReadAccountStorageNoStateWithRecent(addr []byte, 
 	copy(ac.keyBuf[len(addr):], loc)
 	return ac.storage.GetNoStateWithRecent(ac.keyBuf, txNum, ac.tx)
 }
-func (ac *Aggregator22Context) ReadAccountStorageNoStateWithRecent2(key []byte, txNum uint64) ([]byte, bool, error) {
+func (ac *AggregatorV3Context) ReadAccountStorageNoStateWithRecent2(key []byte, txNum uint64) ([]byte, bool, error) {
 	return ac.storage.GetNoStateWithRecent(key, txNum, ac.tx)
 }
 
-func (ac *Aggregator22Context) ReadAccountStorageNoState(addr []byte, loc []byte, txNum uint64) ([]byte, bool, error) {
+func (ac *AggregatorV3Context) ReadAccountStorageNoState(addr []byte, loc []byte, txNum uint64) ([]byte, bool, error) {
 	if cap(ac.keyBuf) < len(addr)+len(loc) {
 		ac.keyBuf = make([]byte, len(addr)+len(loc))
 	} else if len(ac.keyBuf) != len(addr)+len(loc) {
@@ -1200,26 +1208,38 @@ func (ac *Aggregator22Context) ReadAccountStorageNoState(addr []byte, loc []byte
 	return ac.storage.GetNoState(ac.keyBuf, txNum)
 }
 
-func (ac *Aggregator22Context) ReadAccountCodeNoStateWithRecent(addr []byte, txNum uint64) ([]byte, bool, error) {
+func (ac *AggregatorV3Context) ReadAccountCodeNoStateWithRecent(addr []byte, txNum uint64) ([]byte, bool, error) {
 	return ac.code.GetNoStateWithRecent(addr, txNum, ac.tx)
 }
-func (ac *Aggregator22Context) ReadAccountCodeNoState(addr []byte, txNum uint64) ([]byte, bool, error) {
+func (ac *AggregatorV3Context) ReadAccountCodeNoState(addr []byte, txNum uint64) ([]byte, bool, error) {
 	return ac.code.GetNoState(addr, txNum)
 }
 
-func (ac *Aggregator22Context) ReadAccountCodeSizeNoStateWithRecent(addr []byte, txNum uint64) (int, bool, error) {
+func (ac *AggregatorV3Context) ReadAccountCodeSizeNoStateWithRecent(addr []byte, txNum uint64) (int, bool, error) {
 	code, noState, err := ac.code.GetNoStateWithRecent(addr, txNum, ac.tx)
 	if err != nil {
 		return 0, false, err
 	}
 	return len(code), noState, nil
 }
-func (ac *Aggregator22Context) ReadAccountCodeSizeNoState(addr []byte, txNum uint64) (int, bool, error) {
+func (ac *AggregatorV3Context) ReadAccountCodeSizeNoState(addr []byte, txNum uint64) (int, bool, error) {
 	code, noState, err := ac.code.GetNoState(addr, txNum)
 	if err != nil {
 		return 0, false, err
 	}
 	return len(code), noState, nil
+}
+
+func (ac *AggregatorV3Context) AccountHistoryIterateChanged(startTxNum, endTxNum uint64, roTx kv.Tx) *HistoryIterator1 {
+	return ac.accounts.IterateChanged(startTxNum, endTxNum, roTx)
+}
+
+func (ac *AggregatorV3Context) StorageHistoryIterateChanged(startTxNum, endTxNum uint64, roTx kv.Tx) *HistoryIterator1 {
+	return ac.storage.IterateChanged(startTxNum, endTxNum, roTx)
+}
+
+func (ac *AggregatorV3Context) StorageHistoricalStateRange(startTxNum uint64, from, to []byte, amount int, roTx kv.Tx) *WalkAsOfIter {
+	return ac.storage.WalkAsOf(startTxNum, from, to, roTx, amount)
 }
 
 type FilesStats22 struct {
@@ -1234,7 +1254,7 @@ func (a *AggregatorV3) Code() *History     { return a.code }
 func (a *AggregatorV3) Accounts() *History { return a.accounts }
 func (a *AggregatorV3) Storage() *History  { return a.storage }
 
-type Aggregator22Context struct {
+type AggregatorV3Context struct {
 	tx         kv.Tx
 	a          *AggregatorV3
 	accounts   *HistoryContext
@@ -1247,8 +1267,8 @@ type Aggregator22Context struct {
 	keyBuf     []byte
 }
 
-func (a *AggregatorV3) MakeContext() *Aggregator22Context {
-	return &Aggregator22Context{
+func (a *AggregatorV3) MakeContext() *AggregatorV3Context {
+	return &AggregatorV3Context{
 		a:          a,
 		accounts:   a.accounts.MakeContext(),
 		storage:    a.storage.MakeContext(),
@@ -1259,8 +1279,8 @@ func (a *AggregatorV3) MakeContext() *Aggregator22Context {
 		tracesTo:   a.tracesTo.MakeContext(),
 	}
 }
-func (ac *Aggregator22Context) SetTx(tx kv.Tx) { ac.tx = tx }
-func (ac *Aggregator22Context) Close()         {}
+func (ac *AggregatorV3Context) SetTx(tx kv.Tx) { ac.tx = tx }
+func (ac *AggregatorV3Context) Close()         {}
 
 // BackgroundResult - used only indicate that some work is done
 // no much reason to pass exact results by this object, just get latest state when need

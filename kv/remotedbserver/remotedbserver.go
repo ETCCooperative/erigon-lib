@@ -17,8 +17,8 @@
 package remotedbserver
 
 import (
-	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -26,12 +26,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ledgerwatch/erigon-lib/kv/iter"
+	"github.com/ledgerwatch/erigon-lib/kv/order"
 	"github.com/ledgerwatch/log/v3"
 	"go.uber.org/atomic"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	"github.com/ledgerwatch/erigon-lib/common"
-	"github.com/ledgerwatch/erigon-lib/common/cmp"
 	"github.com/ledgerwatch/erigon-lib/common/dbg"
 	"github.com/ledgerwatch/erigon-lib/common/hexutility"
 	"github.com/ledgerwatch/erigon-lib/gointerfaces/remote"
@@ -76,7 +78,8 @@ type KvServer struct {
 	txsMapLock *sync.RWMutex
 	txs        map[uint64]*threadSafeTx
 
-	trace bool
+	trace     bool
+	rangeStep int // make sure `s.with` has limited time
 }
 
 type threadSafeTx struct {
@@ -90,8 +93,9 @@ type Snapsthots interface {
 
 func NewKvServer(ctx context.Context, db kv.RoDB, snapshots Snapsthots, historySnapshots Snapsthots) *KvServer {
 	return &KvServer{
-		trace: false,
-		kv:    db, stateChangeStreams: newStateChangeStreams(), ctx: ctx,
+		trace:     false,
+		rangeStep: 1024,
+		kv:        db, stateChangeStreams: newStateChangeStreams(), ctx: ctx,
 		blockSnapshots: snapshots, historySnapshots: historySnapshots,
 		txs: map[uint64]*threadSafeTx{}, txsMapLock: &sync.RWMutex{},
 	}
@@ -502,7 +506,7 @@ func (s *StateChangePubSub) remove(id uint) {
 // Temporal methods
 func (s *KvServer) DomainGet(ctx context.Context, req *remote.DomainGetReq) (reply *remote.DomainGetReply, err error) {
 	reply = &remote.DomainGetReply{}
-	if err := s.with(req.TxID, func(tx kv.Tx) error {
+	if err := s.with(req.TxId, func(tx kv.Tx) error {
 		ttx, ok := tx.(kv.TemporalTx)
 		if !ok {
 			return fmt.Errorf("server DB doesn't implement kv.Temporal interface")
@@ -519,7 +523,7 @@ func (s *KvServer) DomainGet(ctx context.Context, req *remote.DomainGetReq) (rep
 }
 func (s *KvServer) HistoryGet(ctx context.Context, req *remote.HistoryGetReq) (reply *remote.HistoryGetReply, err error) {
 	reply = &remote.HistoryGetReply{}
-	if err := s.with(req.TxID, func(tx kv.Tx) error {
+	if err := s.with(req.TxId, func(tx kv.Tx) error {
 		ttx, ok := tx.(kv.TemporalTx)
 		if !ok {
 			return fmt.Errorf("server DB doesn't implement kv.Temporal interface")
@@ -534,26 +538,29 @@ func (s *KvServer) HistoryGet(ctx context.Context, req *remote.HistoryGetReq) (r
 	}
 	return reply, nil
 }
-func (s *KvServer) IndexRange(req *remote.IndexRangeReq, stream remote.KV_IndexRangeServer) error {
+
+/*
+func (s *KvServer) IndexStream(req *remote.IndexRangeReq, stream remote.KV_IndexStreamServer) error {
 	const step = 4096 // make sure `s.with` has limited time
-	for from := req.FromTs; from < req.ToTs; from += step {
-		to := cmp.Min(req.ToTs, from+step)
-		if err := s.with(req.TxID, func(tx kv.Tx) error {
+	var last int
+	for from := int(req.FromTs); from < int(req.ToTs); from = last {
+		if err := s.with(req.TxId, func(tx kv.Tx) error {
 			ttx, ok := tx.(kv.TemporalTx)
 			if !ok {
 				return fmt.Errorf("server DB doesn't implement kv.Temporal interface")
 			}
-			it, err := ttx.IndexRange(kv.InvertedIdx(req.Table), req.K, from, to)
+			it, err := ttx.IndexRange(kv.InvertedIdx(req.Table), req.K, uint64(from), uint64(req.ToTs), order.By(req.OrderAscend), step)
 			if err != nil {
 				return err
 			}
-			bm, err := it.ToBitmap()
+			bm, err := it.(bitmapdb.ToBitamp).ToBitmap()
 			if err != nil {
 				return err
 			}
 			if err := stream.Send(&remote.IndexRangeReply{Timestamps: bm.ToArray()}); err != nil {
 				return err
 			}
+			last = int(bm.Maximum())
 			return nil
 		}); err != nil {
 			return err
@@ -562,54 +569,214 @@ func (s *KvServer) IndexRange(req *remote.IndexRangeReq, stream remote.KV_IndexR
 	return nil
 }
 
-func (s *KvServer) Range(req *remote.RangeReq, stream remote.KV_RangeServer) error {
-	if req.ToPrefix != nil && bytes.Compare(req.FromPrefix, req.ToPrefix) >= 0 {
-		return fmt.Errorf("tx.Range: %x must be lexicographicaly before %x", req.FromPrefix, req.ToPrefix)
-	}
-	var k, v []byte
+*/
 
-	if req.FromPrefix == nil {
-		req.FromPrefix = []byte{}
-	}
-	const step = 1024 // make sure `s.with` has limited time
-	for from := req.FromPrefix; from != nil; from = k {
-		if req.ToPrefix != nil && bytes.Compare(from, req.ToPrefix) >= 0 {
-			break
+const PageSizeLimit = 4 * 4096
+
+func (s *KvServer) IndexRange(ctx context.Context, req *remote.IndexRangeReq) (*remote.IndexRangeReply, error) {
+	reply := &remote.IndexRangeReply{}
+	from, limit := int(req.FromTs), int(req.Limit)
+	if req.PageToken != "" {
+		var pagination remote.IndexPagination
+		if err := unmarshalPagination(req.PageToken, &pagination); err != nil {
+			return nil, err
 		}
-		resp := &remote.Pairs{}
-		if err := s.with(req.TxID, func(tx kv.Tx) error {
-			c, err := tx.Cursor(req.Table)
+		from = int(pagination.NextTimeStamp)
+	}
+	if req.PageSize <= 0 || req.PageSize > PageSizeLimit {
+		req.PageSize = PageSizeLimit
+	}
+
+	if err := s.with(req.TxId, func(tx kv.Tx) error {
+		ttx, ok := tx.(kv.TemporalTx)
+		if !ok {
+			return fmt.Errorf("server DB doesn't implement kv.Temporal interface")
+		}
+		it, err := ttx.IndexRange(kv.InvertedIdx(req.Table), req.K, uint64(from), uint64(req.ToTs), order.By(req.OrderAscend), limit)
+		if err != nil {
+			return err
+		}
+		for it.HasNext() {
+			v, err := it.Next()
 			if err != nil {
 				return err
 			}
-			defer c.Close()
-			i := 0
-			for k, v, err = c.Seek(from); k != nil; k, v, err = c.Next() {
+			reply.Timestamps = append(reply.Timestamps, v)
+			limit--
+		}
+		if len(reply.Timestamps) == PageSizeLimit && it.HasNext() {
+			next, err := it.Next()
+			if err != nil {
+				return err
+			}
+			reply.NextPageToken, err = marshalPagination(&remote.IndexPagination{NextTimeStamp: int64(next), Limit: int64(limit)})
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return reply, nil
+}
+
+/*
+func (s *KvServer) Stream(req *remote.RangeReq, stream remote.KV_StreamServer) error {
+	orderAscend, fromPrefix, toPrefix := req.OrderAscend, req.FromPrefix, req.ToPrefix
+	if orderAscend && fromPrefix != nil && toPrefix != nil && bytes.Compare(fromPrefix, toPrefix) >= 0 {
+		return fmt.Errorf("tx.Dual: %x must be lexicographicaly before %x", fromPrefix, toPrefix)
+	}
+	if !orderAscend && fromPrefix != nil && toPrefix != nil && bytes.Compare(fromPrefix, toPrefix) <= 0 {
+		return fmt.Errorf("tx.Dual: %x must be lexicographicaly before %x", toPrefix, fromPrefix)
+	}
+
+	var k, v []byte
+
+	if req.OrderAscend && fromPrefix == nil {
+		fromPrefix = []byte{}
+	}
+
+	var it iter.KV
+	var err error
+	var skipFirst = false
+
+	limit := int(req.PageSize)
+	step := cmp.Min(s.rangeStep, limit) // make sure `s.with` has limited time
+	for from := fromPrefix; ; from = k {
+		if (req.OrderAscend && from == nil) || limit == 0 {
+			break
+		}
+		if toPrefix != nil {
+			cmp := bytes.Compare(from, toPrefix)
+			hasNext := (orderAscend && cmp < 0) || (!orderAscend && cmp > 0)
+			if !hasNext {
+				break
+			}
+		}
+
+		reply := &remote.Pairs{}
+		if err = s.with(req.TxId, func(tx kv.Tx) error {
+			if orderAscend {
+				it, err = tx.RangeAscend(req.Table, from, toPrefix, step)
 				if err != nil {
 					return err
 				}
-				if req.ToPrefix != nil && bytes.Compare(k, req.ToPrefix) >= 0 {
-					break
-				}
-
-				resp.Keys = append(resp.Keys, k)
-				resp.Values = append(resp.Values, v)
-
-				i++
-				if i > step {
-					break
+			} else {
+				it, err = tx.RangeDescend(req.Table, from, toPrefix, step)
+				if err != nil {
+					return err
 				}
 			}
-			k = common.Copy(k)
+			k = nil
+			for it.HasNext() {
+				k, v, err = it.Next()
+				if err != nil {
+					return err
+				}
+				reply.Keys = append(reply.Keys, k)
+				reply.Values = append(reply.Values, v)
+				limit--
+			}
+			if k != nil {
+				k = common.Copy(k)
+				if req.OrderAscend {
+					k = append(k, []byte{01}...)
+				} else {
+					if skipFirst {
+						reply.Keys = reply.Keys[1:]
+						reply.Values = reply.Values[1:]
+					}
+					skipFirst = true
+				}
+			}
 			return nil
 		}); err != nil {
 			return err
 		}
-		if len(resp.Keys) > 0 {
-			if err := stream.Send(resp); err != nil {
+
+		if len(reply.Keys) > 0 {
+			if err := stream.Send(reply); err != nil {
+				return err
+			}
+		} else {
+			break
+		}
+	}
+	return nil
+}
+*/
+
+func (s *KvServer) Range(ctx context.Context, req *remote.RangeReq) (*remote.Pairs, error) {
+	from, limit := req.FromPrefix, int(req.Limit)
+	if req.PageToken != "" {
+		var pagination remote.ParisPagination
+		if err := unmarshalPagination(req.PageToken, &pagination); err != nil {
+			return nil, err
+		}
+		from, limit = pagination.NextKey, int(pagination.Limit)
+	}
+	if req.PageSize <= 0 || req.PageSize > PageSizeLimit {
+		req.PageSize = PageSizeLimit
+	}
+
+	reply := &remote.Pairs{}
+	var err error
+	if err = s.with(req.TxId, func(tx kv.Tx) error {
+		var it iter.KV
+		if req.OrderAscend {
+			it, err = tx.RangeAscend(req.Table, from, req.ToPrefix, limit)
+			if err != nil {
+				return err
+			}
+		} else {
+			it, err = tx.RangeDescend(req.Table, from, req.ToPrefix, limit)
+			if err != nil {
 				return err
 			}
 		}
+		for it.HasNext() {
+			k, v, err := it.Next()
+			if err != nil {
+				return err
+			}
+			reply.Keys = append(reply.Keys, k)
+			reply.Values = append(reply.Values, v)
+			limit--
+		}
+		if len(reply.Keys) == PageSizeLimit && it.HasNext() {
+			nextK, _, err := it.Next()
+			if err != nil {
+				return err
+			}
+			reply.NextPageToken, err = marshalPagination(&remote.ParisPagination{NextKey: nextK, Limit: int64(limit)})
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return reply, nil
+}
+
+// see: https://cloud.google.com/apis/design/design_patterns
+func marshalPagination(m proto.Message) (string, error) {
+	pageToken, err := proto.Marshal(m)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(pageToken), nil
+}
+
+func unmarshalPagination(pageToken string, m proto.Message) error {
+	token, err := base64.StdEncoding.DecodeString(pageToken)
+	if err != nil {
+		return err
+	}
+	if err = proto.Unmarshal(token, m); err != nil {
+		return err
 	}
 	return nil
 }

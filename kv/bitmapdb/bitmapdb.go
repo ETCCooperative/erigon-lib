@@ -33,7 +33,7 @@ import (
 const MaxUint32 = 1<<32 - 1
 
 type ToBitamp interface {
-	ToBitamp() (*roaring64.Bitmap, error)
+	ToBitmap() (*roaring64.Bitmap, error)
 }
 
 var roaringPool = sync.Pool{
@@ -202,7 +202,6 @@ func Get(db kv.Tx, bucket string, key []byte, from, to uint32) (*roaring.Bitmap,
 		}
 		chunks = append(chunks, bm)
 		if binary.BigEndian.Uint32(k[len(k)-4:]) >= to {
-			bm.RemoveRange(uint64(to), uint64(bm.Maximum()))
 			break
 		}
 	}
@@ -360,7 +359,6 @@ func Get64(db kv.Tx, bucket string, key []byte, from, to uint64) (*roaring64.Bit
 		}
 		chunks = append(chunks, bm)
 		if binary.BigEndian.Uint64(k[len(k)-8:]) >= to {
-			bm.RemoveRange(to, bm.Maximum())
 			break
 		}
 	}
@@ -422,3 +420,10 @@ func Bytesmask(fixedbits int) (fixedbytes int, mask byte) {
 type ToBitmap interface {
 	ToBitmap() (*roaring64.Bitmap, error)
 }
+
+func ToIter(it roaring64.IntIterable64) *ToIterInterface { return &ToIterInterface{it: it} }
+
+type ToIterInterface struct{ it roaring64.IntIterable64 }
+
+func (i *ToIterInterface) HasNext() bool         { return i.it.HasNext() }
+func (i *ToIterInterface) Next() (uint64, error) { return i.it.Next(), nil }
