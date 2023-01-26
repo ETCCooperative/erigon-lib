@@ -31,6 +31,10 @@ func ToDualArray[K, V any](s Dual[K, V]) (keys []K, values []V, err error) {
 	return keys, values, nil
 }
 
+func ExpectEqualU64(tb testing.TB, s1, s2 Unary[uint64]) {
+	tb.Helper()
+	ExpectEqual[uint64](tb, s1, s2)
+}
 func ExpectEqual[V comparable](tb testing.TB, s1, s2 Unary[V]) {
 	tb.Helper()
 	for s1.HasNext() && s2.HasNext() {
@@ -53,4 +57,21 @@ func ExpectEqual[V comparable](tb testing.TB, s1, s2 Unary[V]) {
 	}
 	require.False(tb, has1, label)
 	require.False(tb, has2, label)
+}
+
+// PairsWithErrorIter - return N, keys and then error
+type PairsWithErrorIter struct {
+	errorAt, i int
+}
+
+func PairsWithError(errorAt int) *PairsWithErrorIter {
+	return &PairsWithErrorIter{errorAt: errorAt}
+}
+func (m *PairsWithErrorIter) HasNext() bool { return true }
+func (m *PairsWithErrorIter) Next() ([]byte, []byte, error) {
+	if m.i >= m.errorAt {
+		return nil, nil, fmt.Errorf("expected error at iteration: %d", m.errorAt)
+	}
+	m.i++
+	return []byte(fmt.Sprintf("%x", m.i)), []byte(fmt.Sprintf("%x", m.i)), nil
 }
