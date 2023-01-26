@@ -103,6 +103,10 @@ type Config struct {
 }
 
 func (c *Config) String() string {
+	if c.IsClassic() {
+		return ConfigString_Classic(c)
+	}
+
 	engine := c.getEngine()
 
 	if c.Consensus == ParliaConsensus {

@@ -17,7 +17,9 @@
 package chain
 
 import (
+	"fmt"
 	"math/big"
+	"strings"
 )
 
 var classicChainID = big.NewInt(61)
@@ -74,4 +76,57 @@ func (c *Config) ECIP1099ForkBlockUint64() *uint64 {
 	}
 	n := c.ECIP1099Block.Uint64()
 	return &n
+}
+
+func ConfigString_Classic(c *Config) string {
+	if c == nil {
+		return "nil"
+	}
+
+	entries := []struct {
+		name  string
+		value *big.Int
+	}{
+		{"ECIP1010Block", c.ECIP1010Block},
+		{"ECIP1010DisableBlock", c.ECIP1010DisableBlock},
+		{"ECIP1017Block", c.ECIP1017Block},
+		{"ECIP1041Block", c.ECIP1041Block},
+		{"ECIP1099Block", c.ECIP1099Block},
+		{"ClassicEIP155Block", c.ClassicEIP155Block},
+		{"ClassicEIP160Block", c.ClassicEIP160Block},
+		{"ClassicMystiqueBlock", c.ClassicMystiqueBlock},
+	}
+
+	// entryStrings become "name: value" for each entry.
+	entryStrings := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		entryStrings = append(entryStrings, fmt.Sprintf("%s: %v", entry.name, entry.value))
+	}
+	// entryStrings are joined by a comma and space, then inserted in the config string's curly braces.
+	custom := strings.Join(entryStrings, ", ")
+
+	engine := c.getEngine()
+	return fmt.Sprintf("{ChainID: %v, Homestead: %v, DAO: %v, DAO Support: %v, Tangerine Whistle: %v, Spurious Dragon: %v, Byzantium: %v, Constantinople: %v, Petersburg: %v, Istanbul: %v, Muir Glacier: %v, Berlin: %v, London: %v, Arrow Glacier: %v, Gray Glacier: %v, Terminal Total Difficulty: %v, Merge Netsplit: %v, Shanghai: %v, Cancun: %v, Engine: %v%s}",
+		c.ChainID,
+		c.HomesteadBlock,
+		c.DAOForkBlock,
+		c.DAOForkSupport,
+		c.TangerineWhistleBlock,
+		c.SpuriousDragonBlock,
+		c.ByzantiumBlock,
+		c.ConstantinopleBlock,
+		c.PetersburgBlock,
+		c.IstanbulBlock,
+		c.MuirGlacierBlock,
+		c.BerlinBlock,
+		c.LondonBlock,
+		c.ArrowGlacierBlock,
+		c.GrayGlacierBlock,
+		c.TerminalTotalDifficulty,
+		c.MergeNetsplitBlock,
+		c.ShanghaiTime,
+		c.CancunTime,
+		engine,
+		custom,
+	)
 }
