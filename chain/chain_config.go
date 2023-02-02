@@ -82,8 +82,6 @@ type Config struct {
 	Eip1559FeeCollector           *common.Address `json:"eip1559FeeCollector,omitempty"`           // (Optional) Address where burnt EIP-1559 fees go to
 	Eip1559FeeCollectorTransition *big.Int        `json:"eip1559FeeCollectorTransition,omitempty"` // (Optional) Block from which burnt EIP-1559 fees go to the Eip1559FeeCollector
 
-	EIP158Block *big.Int `json:"eip158Block,omitempty"` // EIP158 HF block
-
 	// Ethereum Classic (ETC) fork blocks
 	ECIP1010Block        *big.Int `json:"ecip1010Block,omitempty"`        // ECIP1010 switch block (nil = no fork, 0 = already activated)
 	ECIP1010DisableBlock *big.Int `json:"ecip1010DisableBlock,omitempty"` // ECIP1010 switch DISABLE block (nil = no fork, 0 = already activated); The ECIP defines a 2M bomb delay.
@@ -670,7 +668,7 @@ type Rules struct {
 	IsSharding                                              bool
 	IsNano, IsMoran, IsGibbs                                bool
 	IsEip1559FeeCollector                                   bool
-	IsParlia, IsStarknet, IsAura                            bool
+	IsParlia, IsAura                                        bool
 	IsEIP150, IsEIP155, IsEIP158                            bool
 
 	// IsDieHard and IsMystique are Ethereum Classic-specific fork switches
@@ -704,7 +702,6 @@ func (c *Config) Rules(num uint64, time uint64) *Rules {
 		IsAura:                c.Aura != nil,
 		IsEIP150:              c.IsTangerineWhistle(num),
 		IsEIP155:              c.IsSpuriousDragon(num),
-		IsEIP158:              isForked(c.EIP158Block, num),
 
 		IsDieHard:  c.IsClassic() && isForked(c.ClassicEIP160Block, num),
 		IsMystique: c.IsClassic() && isForked(c.ClassicMystiqueBlock, num),
