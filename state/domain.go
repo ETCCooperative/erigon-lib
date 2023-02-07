@@ -33,6 +33,7 @@ import (
 
 	"github.com/RoaringBitmap/roaring/roaring64"
 	"github.com/google/btree"
+	"github.com/ledgerwatch/erigon-lib/kv/bitmapdb"
 	"github.com/ledgerwatch/log/v3"
 	btree2 "github.com/tidwall/btree"
 	atomic2 "go.uber.org/atomic"
@@ -69,7 +70,7 @@ type filesItem struct {
 }
 
 func (i *filesItem) isSubsetOf(j *filesItem) bool {
-	return j.startTxNum <= i.startTxNum && i.endTxNum <= j.endTxNum
+	return (j.startTxNum <= i.startTxNum && i.endTxNum <= j.endTxNum) && (j.startTxNum != i.startTxNum || i.endTxNum != j.endTxNum)
 }
 
 func filesItemLess(i, j *filesItem) bool {
@@ -77,6 +78,26 @@ func filesItemLess(i, j *filesItem) bool {
 		return i.startTxNum > j.startTxNum
 	}
 	return i.endTxNum < j.endTxNum
+}
+func (i *filesItem) closeFilesAndRemove() {
+	if i.decompressor != nil {
+		if err := i.decompressor.Close(); err != nil {
+			log.Trace("close", "err", err, "file", i.decompressor.FileName())
+		}
+		if err := os.Remove(i.decompressor.FilePath()); err != nil {
+			log.Trace("close", "err", err, "file", i.decompressor.FileName())
+		}
+		i.decompressor = nil
+	}
+	if i.index != nil {
+		if err := i.index.Close(); err != nil {
+			log.Trace("close", "err", err, "file", i.index.FileName())
+		}
+		if err := os.Remove(i.index.FilePath()); err != nil {
+			log.Trace("close", "err", err, "file", i.index.FileName())
+		}
+		i.index = nil
+	}
 }
 
 type DomainStats struct {
@@ -452,6 +473,13 @@ type ctxItem struct {
 	src *filesItem
 }
 
+type ctxLocalityItem struct {
+	reader *recsplit.IndexReader
+	bm     *bitmapdb.FixedSizeBitmaps
+
+	file *filesItem
+}
+
 func ctxItemLess(i, j ctxItem) bool {
 	if i.endTxNum == j.endTxNum {
 		return i.startTxNum > j.startTxNum
@@ -501,11 +529,11 @@ func (d *Domain) collectFilesStats() (datsz, idxsz, files uint64) {
 }
 
 func (d *Domain) MakeContext() *DomainContext {
-	dc := &DomainContext{d: d}
-	dc.hc = d.History.MakeContext()
-	bt := btree.NewG[ctxItem](32, ctxItemLess)
-	dc.files = bt
-
+	dc := &DomainContext{
+		d:     d,
+		hc:    d.History.MakeContext(),
+		files: btree.NewG[ctxItem](32, ctxItemLess),
+	}
 	d.files.Walk(func(items []*filesItem) bool {
 		for _, item := range items {
 			if item.index == nil || item.canDelete.Load() {
@@ -516,7 +544,7 @@ func (d *Domain) MakeContext() *DomainContext {
 				item.refcount.Inc()
 			}
 
-			bt.ReplaceOrInsert(ctxItem{
+			dc.files.ReplaceOrInsert(ctxItem{
 				startTxNum: item.startTxNum,
 				endTxNum:   item.endTxNum,
 				getter:     item.decompressor.MakeGetter(),
@@ -539,24 +567,7 @@ func (dc *DomainContext) Close() {
 		refCnt := item.src.refcount.Dec()
 		//GC: last reader responsible to remove useles files: close it and delete
 		if refCnt == 0 && item.src.canDelete.Load() {
-			if item.src.decompressor != nil {
-				if err := item.src.decompressor.Close(); err != nil {
-					log.Trace("close", "err", err, "file", item.src.decompressor.FileName())
-				}
-				if err := os.Remove(item.src.decompressor.FilePath()); err != nil {
-					log.Trace("close", "err", err, "file", item.src.decompressor.FileName())
-				}
-				item.src.decompressor = nil
-			}
-			if item.src.index != nil {
-				if err := item.src.index.Close(); err != nil {
-					log.Trace("close", "err", err, "file", item.src.decompressor.FileName())
-				}
-				if err := os.Remove(item.src.index.FilePath()); err != nil {
-					log.Trace("close", "err", err, "file", item.src.index.FileName())
-				}
-				item.src.index = nil
-			}
+			item.src.closeFilesAndRemove()
 		}
 		return true
 	})

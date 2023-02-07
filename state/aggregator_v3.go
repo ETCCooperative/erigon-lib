@@ -108,14 +108,27 @@ func (a *AggregatorV3) Close() {
 	a.closeFiles()
 }
 
+/*
+// CleanDir - remove all useless files. call it manually on startup of Main application (don't call it from utilities)
+func (a *AggregatorV3) CleanDir() {
+	a.accounts.CleanupDir()
+	a.storage.CleanupDir()
+	a.code.CleanupDir()
+	a.logAddrs.CleanupDir()
+	a.logTopics.CleanupDir()
+	a.tracesFrom.CleanupDir()
+	a.tracesTo.CleanupDir()
+}
+*/
+
 func (a *AggregatorV3) SetWorkers(i int) {
-	a.accounts.workers = i
-	a.storage.workers = i
-	a.code.workers = i
-	a.logAddrs.workers = i
-	a.logTopics.workers = i
-	a.tracesFrom.workers = i
-	a.tracesTo.workers = i
+	a.accounts.compressWorkers = i
+	a.storage.compressWorkers = i
+	a.code.compressWorkers = i
+	a.logAddrs.compressWorkers = i
+	a.logTopics.compressWorkers = i
+	a.tracesFrom.compressWorkers = i
+	a.tracesTo.compressWorkers = i
 }
 
 func (a *AggregatorV3) Files() (res []string) {
@@ -153,50 +166,45 @@ func (a *AggregatorV3) closeFiles() {
 	}
 }
 
-func (a *AggregatorV3) BuildOptionalMissedIndices(ctx context.Context) {
+func (a *AggregatorV3) BuildOptionalMissedIndicesInBackground(ctx context.Context, workers int) {
 	if a.workingOptionalIndices.Load() {
 		return
 	}
 	a.workingOptionalIndices.Store(true)
+
 	go func() {
 		defer a.workingOptionalIndices.Store(false)
-
-		//It's time to build optional lazy indices
-
-		if err := a.accounts.localityIndex.BuildMissedIndices(ctx, a.accounts.InvertedIndex); err != nil {
-			log.Warn("merge", "err", err)
-		}
-		if err := a.storage.localityIndex.BuildMissedIndices(ctx, a.storage.InvertedIndex); err != nil {
-			log.Warn("merge", "err", err)
-		}
-		if err := a.code.localityIndex.BuildMissedIndices(ctx, a.code.InvertedIndex); err != nil {
+		if err := a.BuildOptionalMissedIndices(ctx, workers); err != nil {
 			log.Warn("merge", "err", err)
 		}
 	}()
 }
 
+func (a *AggregatorV3) BuildOptionalMissedIndices(ctx context.Context, workers int) error {
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(workers)
+	if a.accounts != nil {
+		g.Go(func() error { return a.accounts.BuildOptionalMissedIndices(ctx) })
+	}
+	if a.storage != nil {
+		g.Go(func() error { return a.storage.BuildOptionalMissedIndices(ctx) })
+	}
+	if a.code != nil {
+		g.Go(func() error { return a.code.BuildOptionalMissedIndices(ctx) })
+	}
+	return g.Wait()
+}
+
 func (a *AggregatorV3) BuildMissedIndices(ctx context.Context, sem *semaphore.Weighted) error {
-	if err := a.storage.localityIndex.BuildMissedIndices(ctx, a.storage.InvertedIndex); err != nil {
-		panic(err)
-	}
-	if err := a.accounts.localityIndex.BuildMissedIndices(ctx, a.accounts.InvertedIndex); err != nil {
-		return err
-	}
-	if err := a.code.localityIndex.BuildMissedIndices(ctx, a.code.InvertedIndex); err != nil {
-		return err
-	}
 	g, ctx := errgroup.WithContext(ctx)
 	if a.accounts != nil {
 		g.Go(func() error { return a.accounts.BuildMissedIndices(ctx, sem) })
-		g.Go(func() error { return a.accounts.localityIndex.BuildMissedIndices(ctx, a.accounts.InvertedIndex) })
 	}
 	if a.storage != nil {
 		g.Go(func() error { return a.storage.BuildMissedIndices(ctx, sem) })
-		g.Go(func() error { return a.storage.localityIndex.BuildMissedIndices(ctx, a.storage.InvertedIndex) })
 	}
 	if a.code != nil {
 		g.Go(func() error { return a.code.BuildMissedIndices(ctx, sem) })
-		g.Go(func() error { return a.code.localityIndex.BuildMissedIndices(ctx, a.code.InvertedIndex) })
 	}
 	if a.logAddrs != nil {
 		g.Go(func() error { return a.logAddrs.BuildMissedIndices(ctx, sem) })
@@ -211,7 +219,10 @@ func (a *AggregatorV3) BuildMissedIndices(ctx context.Context, sem *semaphore.We
 		g.Go(func() error { return a.tracesTo.BuildMissedIndices(ctx, sem) })
 	}
 
-	return g.Wait()
+	if err := g.Wait(); err != nil {
+		return err
+	}
+	return a.BuildOptionalMissedIndices(ctx, 4)
 }
 
 func (a *AggregatorV3) SetLogPrefix(v string) { a.logPrefix = v }
@@ -483,12 +494,15 @@ func (a *AggregatorV3) mergeLoopStep(ctx context.Context, workers int) (somethin
 	ac := a.MakeContext() // this need, to ensure we do all operations on files in "transaction-style", maybe we will ensure it on type-level in future
 	defer ac.Close()
 
-	outs := a.staticFilesInRange(r, ac)
+	outs, err := a.staticFilesInRange(r, ac)
 	defer func() {
 		if closeAll {
 			outs.Close()
 		}
 	}()
+	if err != nil {
+		return false, err
+	}
 
 	in, err := a.mergeFiles(ctx, outs, r, maxSpan, workers)
 	if err != nil {
@@ -500,6 +514,7 @@ func (a *AggregatorV3) mergeLoopStep(ctx context.Context, workers int) (somethin
 		}
 	}()
 	a.integrateMergedFiles(outs, in)
+	a.cleanAfterFreeze(in)
 	closeAll = false
 	return true, nil
 }
@@ -859,18 +874,25 @@ func (sf SelectedStaticFilesV3) Close() {
 	}
 }
 
-func (a *AggregatorV3) staticFilesInRange(r RangesV3, ac *AggregatorV3Context) SelectedStaticFilesV3 {
+func (a *AggregatorV3) staticFilesInRange(r RangesV3, ac *AggregatorV3Context) (sf SelectedStaticFilesV3, err error) {
 	_ = ac // maybe will move this method to `ac` object
-
-	var sf SelectedStaticFilesV3
 	if r.accounts.any() {
-		sf.accountsIdx, sf.accountsHist, sf.accountsI = a.accounts.staticFilesInRange(r.accounts, ac.accounts)
+		sf.accountsIdx, sf.accountsHist, sf.accountsI, err = a.accounts.staticFilesInRange(r.accounts, ac.accounts)
+		if err != nil {
+			return sf, err
+		}
 	}
 	if r.storage.any() {
-		sf.storageIdx, sf.storageHist, sf.storageI = a.storage.staticFilesInRange(r.storage, ac.storage)
+		sf.storageIdx, sf.storageHist, sf.storageI, err = a.storage.staticFilesInRange(r.storage, ac.storage)
+		if err != nil {
+			return sf, err
+		}
 	}
 	if r.code.any() {
-		sf.codeIdx, sf.codeHist, sf.codeI = a.code.staticFilesInRange(r.code, ac.code)
+		sf.codeIdx, sf.codeHist, sf.codeI, err = a.code.staticFilesInRange(r.code, ac.code)
+		if err != nil {
+			return sf, err
+		}
 	}
 	if r.logAddrs {
 		sf.logAddrs, sf.logAddrsI = a.logAddrs.staticFilesInRange(r.logAddrsStartTxNum, r.logAddrsEndTxNum, ac.logAddrs)
@@ -884,7 +906,7 @@ func (a *AggregatorV3) staticFilesInRange(r RangesV3, ac *AggregatorV3Context) S
 	if r.tracesTo {
 		sf.tracesTo, sf.tracesToI = a.tracesTo.staticFilesInRange(r.tracesToStartTxNum, r.tracesToEndTxNum, ac.tracesTo)
 	}
-	return sf
+	return sf, err
 }
 
 type MergedFilesV3 struct {
@@ -913,90 +935,69 @@ func (mf MergedFilesV3) Close() {
 
 func (a *AggregatorV3) mergeFiles(ctx context.Context, files SelectedStaticFilesV3, r RangesV3, maxSpan uint64, workers int) (MergedFilesV3, error) {
 	var mf MergedFilesV3
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(workers)
 	closeFiles := true
 	defer func() {
 		if closeFiles {
 			mf.Close()
 		}
 	}()
-	//var wg sync.WaitGroup
-	//wg.Add(7)
-	errCh := make(chan error, 7)
-	//go func() {
-	//	defer wg.Done()
-	var err error
 	if r.accounts.any() {
-		if mf.accountsIdx, mf.accountsHist, err = a.accounts.mergeFiles(ctx, files.accountsIdx, files.accountsHist, r.accounts, workers); err != nil {
-			errCh <- err
-		}
+		g.Go(func() error {
+			var err error
+			mf.accountsIdx, mf.accountsHist, err = a.accounts.mergeFiles(ctx, files.accountsIdx, files.accountsHist, r.accounts, workers)
+			return err
+		})
 	}
-	//}()
-	//go func() {
-	//	defer wg.Done()
-	//	var err error
+
 	if r.storage.any() {
-		if mf.storageIdx, mf.storageHist, err = a.storage.mergeFiles(ctx, files.storageIdx, files.storageHist, r.storage, workers); err != nil {
-			errCh <- err
-		}
+		g.Go(func() error {
+			var err error
+			mf.storageIdx, mf.storageHist, err = a.storage.mergeFiles(ctx, files.storageIdx, files.storageHist, r.storage, workers)
+			return err
+		})
 	}
-	//}()
-	//go func() {
-	//	defer wg.Done()
-	//	var err error
 	if r.code.any() {
-		if mf.codeIdx, mf.codeHist, err = a.code.mergeFiles(ctx, files.codeIdx, files.codeHist, r.code, workers); err != nil {
-			errCh <- err
-		}
+		g.Go(func() error {
+			var err error
+			mf.codeIdx, mf.codeHist, err = a.code.mergeFiles(ctx, files.codeIdx, files.codeHist, r.code, workers)
+			return err
+		})
 	}
-	//}()
-	//go func() {
-	//	defer wg.Done()
-	//	var err error
 	if r.logAddrs {
-		if mf.logAddrs, err = a.logAddrs.mergeFiles(ctx, files.logAddrs, r.logAddrsStartTxNum, r.logAddrsEndTxNum, workers); err != nil {
-			errCh <- err
-		}
+		g.Go(func() error {
+			var err error
+			mf.logAddrs, err = a.logAddrs.mergeFiles(ctx, files.logAddrs, r.logAddrsStartTxNum, r.logAddrsEndTxNum, workers)
+			return err
+		})
 	}
-	//}()
-	//go func() {
-	//	defer wg.Done()
-	//	var err error
 	if r.logTopics {
-		if mf.logTopics, err = a.logTopics.mergeFiles(ctx, files.logTopics, r.logTopicsStartTxNum, r.logTopicsEndTxNum, workers); err != nil {
-			errCh <- err
-		}
+		g.Go(func() error {
+			var err error
+			mf.logTopics, err = a.logTopics.mergeFiles(ctx, files.logTopics, r.logTopicsStartTxNum, r.logTopicsEndTxNum, workers)
+			return err
+		})
 	}
-	//}()
-	//go func() {
-	//	defer wg.Done()
-	//	var err error
 	if r.tracesFrom {
-		if mf.tracesFrom, err = a.tracesFrom.mergeFiles(ctx, files.tracesFrom, r.tracesFromStartTxNum, r.tracesFromEndTxNum, workers); err != nil {
-			errCh <- err
-		}
+		g.Go(func() error {
+			var err error
+			mf.tracesFrom, err = a.tracesFrom.mergeFiles(ctx, files.tracesFrom, r.tracesFromStartTxNum, r.tracesFromEndTxNum, workers)
+			return err
+		})
 	}
-	//}()
-	//go func() {
-	//	defer wg.Done()
-	//	var err error
 	if r.tracesTo {
-		if mf.tracesTo, err = a.tracesTo.mergeFiles(ctx, files.tracesTo, r.tracesToStartTxNum, r.tracesToEndTxNum, workers); err != nil {
-			errCh <- err
-		}
+		g.Go(func() error {
+			var err error
+			mf.tracesTo, err = a.tracesTo.mergeFiles(ctx, files.tracesTo, r.tracesToStartTxNum, r.tracesToEndTxNum, workers)
+			return err
+		})
 	}
-	//}()
-	//go func() {
-	//	wg.Wait()
-	close(errCh)
-	//}()
-	var lastError error
-	for err := range errCh {
-		lastError = err
-	}
-	if lastError == nil {
+	err := g.Wait()
+	if err == nil {
 		closeFiles = false
 	}
-	return mf, lastError
+	return mf, err
 }
 
 func (a *AggregatorV3) integrateMergedFiles(outs SelectedStaticFilesV3, in MergedFilesV3) {
@@ -1007,6 +1008,15 @@ func (a *AggregatorV3) integrateMergedFiles(outs SelectedStaticFilesV3, in Merge
 	a.logTopics.integrateMergedFiles(outs.logTopics, in.logTopics)
 	a.tracesFrom.integrateMergedFiles(outs.tracesFrom, in.tracesFrom)
 	a.tracesTo.integrateMergedFiles(outs.tracesTo, in.tracesTo)
+}
+func (a *AggregatorV3) cleanAfterFreeze(in MergedFilesV3) {
+	a.accounts.cleanAfterFreeze(in.accountsHist)
+	a.storage.cleanAfterFreeze(in.storageHist)
+	a.code.cleanAfterFreeze(in.codeHist)
+	a.logAddrs.cleanAfterFreeze(in.logAddrs)
+	a.logTopics.cleanAfterFreeze(in.logTopics)
+	a.tracesFrom.cleanAfterFreeze(in.tracesFrom)
+	a.tracesTo.cleanAfterFreeze(in.tracesTo)
 }
 
 // KeepInDB - usually equal to one a.aggregationStep, but when we exec blocks from snapshots
@@ -1059,7 +1069,7 @@ func (a *AggregatorV3) BuildFilesInBackground(db kv.RoDB) error {
 				log.Warn("merge", "err", err)
 			}
 
-			a.BuildOptionalMissedIndices(a.ctx)
+			a.BuildOptionalMissedIndicesInBackground(a.ctx, 1)
 		}()
 	}()
 
