@@ -710,7 +710,7 @@ func (d *Domain) mergeFiles(ctx context.Context, valuesFiles, indexFiles, histor
 			return nil, nil, nil, fmt.Errorf("merge %s decompressor [%d-%d]: %w", d.filenameBase, r.valuesStartTxNum, r.valuesEndTxNum, err)
 		}
 		//		if valuesIn.index, err = buildIndex(valuesIn.decompressor, idxPath, d.dir, keyCount, false /* values */); err != nil {
-		if valuesIn.index, err = buildIndex(ctx, valuesIn.decompressor, idxPath, d.tmpdir, keyCount, false /* values */); err != nil {
+		if valuesIn.index, err = buildIndexThenOpen(ctx, valuesIn.decompressor, idxPath, d.tmpdir, keyCount, false /* values */); err != nil {
 			return nil, nil, nil, fmt.Errorf("merge %s buildIndex [%d-%d]: %w", d.filenameBase, r.valuesStartTxNum, r.valuesEndTxNum, err)
 		}
 	}
@@ -750,6 +750,10 @@ func (ii *InvertedIndex) mergeFiles(ctx context.Context, files []*filesItem, sta
 			}
 		}
 	}()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
 	datPath := filepath.Join(ii.dir, fmt.Sprintf("%s.%d-%d.ef", ii.filenameBase, startTxNum/ii.aggregationStep, endTxNum/ii.aggregationStep))
 	if comp, err = compress.NewCompressor(ctx, "Snapshots merge", datPath, ii.tmpdir, compress.MinPatternScore, workers, log.LvlTrace); err != nil {
 		return nil, fmt.Errorf("merge %s inverted index compressor: %w", ii.filenameBase, err)
@@ -838,7 +842,7 @@ func (ii *InvertedIndex) mergeFiles(ctx context.Context, files []*filesItem, sta
 	if outItem.decompressor, err = compress.NewDecompressor(datPath); err != nil {
 		return nil, fmt.Errorf("merge %s decompressor [%d-%d]: %w", ii.filenameBase, startTxNum, endTxNum, err)
 	}
-	if outItem.index, err = buildIndex(ctx, outItem.decompressor, idxPath, ii.tmpdir, keyCount, false /* values */); err != nil {
+	if outItem.index, err = buildIndexThenOpen(ctx, outItem.decompressor, idxPath, ii.tmpdir, keyCount, false /* values */); err != nil {
 		return nil, fmt.Errorf("merge %s buildIndex [%d-%d]: %w", ii.filenameBase, startTxNum, endTxNum, err)
 	}
 	closeItem = false
@@ -1072,11 +1076,26 @@ func (d *Domain) integrateMergedFiles(valuesOuts, indexOuts, historyOuts []*file
 		d.files.Delete(out)
 		out.canDelete.Store(true)
 	}
+	d.reCalcRoFiles()
 }
 
 func (ii *InvertedIndex) integrateMergedFiles(outs []*filesItem, in *filesItem) {
 	if in != nil {
 		ii.files.Set(in)
+
+		// `kill -9` may leave some garbage
+		// but it still may be useful for merges, until we finish merge frozen file
+		if in.frozen {
+			ii.files.Walk(func(items []*filesItem) bool {
+				for _, item := range items {
+					if item.frozen || item.endTxNum > in.endTxNum {
+						continue
+					}
+					outs = append(outs, item)
+				}
+				return true
+			})
+		}
 	}
 	for _, out := range outs {
 		if out == nil {
@@ -1085,6 +1104,7 @@ func (ii *InvertedIndex) integrateMergedFiles(outs []*filesItem, in *filesItem) 
 		ii.files.Delete(out)
 		out.canDelete.Store(true)
 	}
+	ii.reCalcRoFiles()
 }
 
 func (h *History) integrateMergedFiles(indexOuts, historyOuts []*filesItem, indexIn, historyIn *filesItem) {
@@ -1114,6 +1134,7 @@ func (h *History) integrateMergedFiles(indexOuts, historyOuts []*filesItem, inde
 		h.files.Delete(out)
 		out.canDelete.Store(true)
 	}
+	h.reCalcRoFiles()
 }
 
 func (d *Domain) cleanAfterFreeze(f *filesItem) {
@@ -1141,11 +1162,11 @@ func (d *Domain) cleanAfterFreeze(f *filesItem) {
 		d.files.Delete(out)
 		out.canDelete.Store(true)
 	}
-	d.History.cleanAfterFreeze(f)
+	d.History.cleanFrozenParts(f)
 }
 
-// cleanAfterFreeze - mark all small files before `f` as `canDelete=true`
-func (h *History) cleanAfterFreeze(f *filesItem) {
+// cleanFrozenParts - mark all small files before `f` as `canDelete=true`
+func (h *History) cleanFrozenParts(f *filesItem) {
 	if f == nil || !f.frozen {
 		return
 	}
@@ -1169,11 +1190,11 @@ func (h *History) cleanAfterFreeze(f *filesItem) {
 		h.files.Delete(out)
 		out.canDelete.Store(true)
 	}
-	h.InvertedIndex.cleanAfterFreeze(f)
+	h.InvertedIndex.cleanFrozenParts(f)
 }
 
-// cleanAfterFreeze - mark all small files before `f` as `canDelete=true`
-func (ii *InvertedIndex) cleanAfterFreeze(f *filesItem) {
+// cleanFrozenParts - mark all small files before `f` as `canDelete=true`
+func (ii *InvertedIndex) cleanFrozenParts(f *filesItem) {
 	if f == nil || !f.frozen {
 		return
 	}
