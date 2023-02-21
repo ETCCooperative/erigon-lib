@@ -82,15 +82,8 @@ type Config struct {
 	Eip1559FeeCollector           *common.Address `json:"eip1559FeeCollector,omitempty"`           // (Optional) Address where burnt EIP-1559 fees go to
 	Eip1559FeeCollectorTransition *big.Int        `json:"eip1559FeeCollectorTransition,omitempty"` // (Optional) Block from which burnt EIP-1559 fees go to the Eip1559FeeCollector
 
-	// Ethereum Classic (ETC) fork blocks
-	ECIP1010Block        *big.Int `json:"ecip1010Block,omitempty"`        // ECIP1010 switch block (nil = no fork, 0 = already activated)
-	ECIP1010DisableBlock *big.Int `json:"ecip1010DisableBlock,omitempty"` // ECIP1010 switch DISABLE block (nil = no fork, 0 = already activated); The ECIP defines a 2M bomb delay.
-	ECIP1017Block        *big.Int `json:"ecip1017Block,omitempty"`        // ECIP1017 switch block (nil = no fork, 0 = already activated)
-	ECIP1041Block        *big.Int `json:"ecip1041Block,omitempty"`        // ECIP1041 switch block (nil = no fork, 0 = already activated)
-	ECIP1099Block        *big.Int `json:"ecip1099Block,omitempty"`        // ECIP1099 switch block (nil = no fork, 0 = already activated)
-	ClassicEIP155Block   *big.Int `json:"classicEIP155,omitempty"`        // Classic EIP155 switch block (nil = no fork, 0 = already activated)
-	ClassicEIP160Block   *big.Int `json:"classicEIP160,omitempty"`        // Classic EIP160 switch block (nil = no fork, 0 = already activated)
-	ClassicMystiqueBlock *big.Int `json:"classicMystique,omitempty"`      // Classic Mystique switch block (nil = no fork, 0 = already activated)
+	// Bor fork blocks
+	CalcuttaBlock *big.Int `json:"calcuttaBlock,omitempty"`
 
 	// Various consensus engines
 	Ethash *EthashConfig `json:"ethash,omitempty"`
@@ -267,6 +260,15 @@ func (c *Config) IsNano(num uint64) bool {
 
 func (c *Config) IsOnNano(num *big.Int) bool {
 	return numEqual(c.NanoBlock, num)
+}
+
+// IsCalcutta returns whether num is either equal to the euler fork block or greater.
+func (c *Config) IsCalcutta(num uint64) bool {
+	return isForked(c.CalcuttaBlock, num)
+}
+
+func (c *Config) IsOnCalcutta(num *big.Int) bool {
+	return numEqual(c.CalcuttaBlock, num)
 }
 
 // IsMuirGlacier returns whether num is either equal to the Muir Glacier (EIP-2384) fork block or greater.
