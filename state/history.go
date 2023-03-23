@@ -63,7 +63,6 @@ type History struct {
 	roFiles atomic2.Pointer[[]ctxItem]
 
 	historyValsTable        string // key1+key2+txnNum -> oldValue , stores values BEFORE change
-	settingsTable           string
 	compressWorkers         int
 	compressVals            bool
 	integrityFileExtensions []string
@@ -72,23 +71,13 @@ type History struct {
 	wal *historyWAL
 }
 
-func NewHistory(
-	dir, tmpdir string,
-	aggregationStep uint64,
-	filenameBase string,
-	indexKeysTable string,
-	indexTable string,
-	historyValsTable string,
-	settingsTable string,
-	compressVals bool,
-	integrityFileExtensions []string,
-	largeValues bool,
-) (*History, error) {
+func NewHistory(dir, tmpdir string, aggregationStep uint64,
+	filenameBase, indexKeysTable, indexTable, historyValsTable string,
+	compressVals bool, integrityFileExtensions []string, largeValues bool) (*History, error) {
 	h := History{
 		files:                   btree2.NewBTreeGOptions[*filesItem](filesItemLess, btree2.Options{Degree: 128, NoLocks: false}),
 		roFiles:                 *atomic2.NewPointer(&[]ctxItem{}),
 		historyValsTable:        historyValsTable,
-		settingsTable:           settingsTable,
 		compressVals:            compressVals,
 		compressWorkers:         1,
 		integrityFileExtensions: integrityFileExtensions,
@@ -565,33 +554,6 @@ func (h *historyWAL) addPrevValue(key1, key2, original []byte) error {
 	if h.discard {
 		return nil
 	}
-
-	/*
-		lk := len(key1) + len(key2)
-		historyKey := make([]byte, lk+8)
-		copy(historyKey, key1)
-		if len(key2) > 0 {
-			copy(historyKey[len(key1):], key2)
-		}
-		if len(original) > 0 {
-			val, err := h.h.tx.GetOne(h.h.settingsTable, historyValCountKey)
-			if err != nil {
-				return err
-			}
-			var valNum uint64
-			if len(val) > 0 {
-				valNum = binary.BigEndian.Uint64(val)
-			}
-			valNum++
-			binary.BigEndian.PutUint64(historyKey[lk:], valNum)
-			if err = h.h.tx.Put(h.h.settingsTable, historyValCountKey, historyKey[lk:]); err != nil {
-				return err
-			}
-			if err = h.h.tx.Put(h.h.historyValsTable, historyKey[lk:], original); err != nil {
-				return err
-			}
-		}
-	*/
 
 	ii := h.h.InvertedIndex
 	if h.largeValues {
@@ -1550,9 +1512,9 @@ func (hc *HistoryContext) getNoStateFromDB(key []byte, txNum uint64, tx kv.Tx) (
 	return val[8:], true, nil
 }
 
-func (hc *HistoryContext) WalkAsOf(startTxNum uint64, from, to []byte, roTx kv.Tx, amount int) iter.KV {
+func (hc *HistoryContext) WalkAsOf(startTxNum uint64, from, to []byte, roTx kv.Tx, limit int) iter.KV {
 	hi := &StateAsOfIterF{
-		from: from, to: to, limit: amount,
+		from: from, to: to, limit: limit,
 
 		hc:           hc,
 		compressVals: hc.h.compressVals,
@@ -1582,7 +1544,7 @@ func (hc *HistoryContext) WalkAsOf(startTxNum uint64, from, to []byte, roTx kv.T
 			indexTable:   hc.h.indexTable,
 			idxKeysTable: hc.h.indexKeysTable,
 			valsTable:    hc.h.historyValsTable,
-			from:         from, to: to, limit: amount,
+			from:         from, to: to, limit: limit,
 
 			hc:         hc,
 			startTxNum: startTxNum,
@@ -1598,7 +1560,7 @@ func (hc *HistoryContext) WalkAsOf(startTxNum uint64, from, to []byte, roTx kv.T
 			indexTable:   hc.h.indexTable,
 			idxKeysTable: hc.h.indexKeysTable,
 			valsTable:    hc.h.historyValsTable,
-			from:         from, to: to, limit: amount,
+			from:         from, to: to, limit: limit,
 
 			hc:         hc,
 			startTxNum: startTxNum,
@@ -1609,7 +1571,7 @@ func (hc *HistoryContext) WalkAsOf(startTxNum uint64, from, to []byte, roTx kv.T
 		}
 		dbit = dbi
 	}
-	return iter.UnionKV(hi, dbit)
+	return iter.UnionKV(hi, dbit, limit)
 }
 
 // StateAsOfIter - returns state range at given time in history
@@ -1993,7 +1955,7 @@ func (hc *HistoryContext) IterateChanged(fromTxNum, toTxNum int, asc order.By, l
 		return nil, err
 	}
 
-	return iter.UnionKV(itOnFiles, itOnDB), nil
+	return iter.UnionKV(itOnFiles, itOnDB, limit), nil
 }
 
 type HistoryChangesIterF struct {
@@ -2632,5 +2594,5 @@ func (hc *HistoryContext) IdxRange(key []byte, startTxNum, endTxNum int, asc ord
 	if err != nil {
 		return nil, err
 	}
-	return iter.Union[uint64](frozenIt, recentIt, asc), nil
+	return iter.Union[uint64](frozenIt, recentIt, asc, limit), nil
 }
