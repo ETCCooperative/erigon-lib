@@ -26,26 +26,18 @@ import (
 )
 
 //Variables Naming:
-//  ts - TimeStap. Ususally it's Etherum's TransactionNumber (auto-increment ID). Or BlockNumber.
 //  tx - Database Transaction
 //  txn - Ethereum Transaction (and TxNum - is also number of Etherum Transaction)
 //  RoTx - Read-Only Database Transaction. RwTx - read-write
 //  k, v - key, value
+//  ts - TimeStamp. Usually it's Etherum's TransactionNumber (auto-increment ID). Or BlockNumber.
 //  Cursor - low-level mdbx-tide api to navigate over Table
 //  Iter - high-level iterator-like api over Table/InvertedIndex/History/Domain. Has less features than Cursor. See package `iter`
 
 //Methods Naming:
 //  Get: exact match of criterias
 //  Range: [from, to). from=nil means StartOfTable, to=nil means EndOfTable, rangeLimit=-1 means Unlimited
-//  Each: Range(from, nil)
 //  Prefix: `Range(Table, prefix, kv.NextSubtree(prefix))`
-
-//Entity Naming:
-//  State: simple table in db
-//  InvertedIndex: supports range-scans
-//  History: can return value of key K as of given TimeStamp. Doesn't know about latest/current
-//              value of key K. Returns NIL if K not changed after TimeStamp.
-//  Domain: as History but also aware about latest/current value of key K.
 
 //Abstraction Layers:
 // LowLevel:
@@ -56,10 +48,20 @@ import (
 //      1. TemporalDB - abstracting DB+Snapshots. Target is:
 //              - provide 'time-travel' API for data: consistan snapshot of data as of given Timestamp.
 //              - to keep DB small - only for Hot/Recent data (can be update/delete by re-org).
+//              - using next entities:
+//                      - InvertedIndex: supports range-scans
+//                      - History: can return value of key K as of given TimeStamp. Doesn't know about latest/current
+//                          value of key K. Returns NIL if K not changed after TimeStamp.
+//                      - Domain: as History but also aware about latest/current value of key K. Can move
+//                          cold (updated long time ago) parts of state from db to snapshots.
+
 // HighLevel:
 //      1. Application - rely on TemporalDB (Ex: ExecutionLayer) or just DB (Ex: TxPool, Sentry, Downloader).
 
 const ReadersLimit = 32000 // MDBX_READERS_LIMIT=32767
+
+// const Unbounded []byte = nil
+const Unlim int = -1
 
 var (
 	ErrAttemptToDeleteNonDeprecatedBucket = errors.New("only buckets from dbutils.ChaindataDeprecatedTables can be deleted")
