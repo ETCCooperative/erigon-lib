@@ -77,9 +77,6 @@ type Config struct {
 	CancunTime   *big.Int `json:"cancunTime,omitempty"`
 	PragueTime   *big.Int `json:"pragueTime,omitempty"`
 
-	// Forks specific to Gnosis Chain
-	PosdaoBlock *big.Int `json:"posdaoBlock,omitempty"`
-
 	Eip1559FeeCollector           *common.Address `json:"eip1559FeeCollector,omitempty"`           // (Optional) Address where burnt EIP-1559 fees go to
 	Eip1559FeeCollectorTransition *big.Int        `json:"eip1559FeeCollectorTransition,omitempty"` // (Optional) Block from which burnt EIP-1559 fees go to the Eip1559FeeCollector
 
@@ -413,18 +410,6 @@ type CliqueConfig struct {
 // String implements the stringer interface, returning the consensus engine details.
 func (c *CliqueConfig) String() string {
 	return "clique"
-}
-
-// AuRaConfig is the consensus engine configs for proof-of-authority based sealing.
-type AuRaConfig struct {
-	DBPath    string
-	InMemory  bool
-	Etherbase common.Address // same as miner etherbase
-}
-
-// String implements the stringer interface, returning the consensus engine details.
-func (c *AuRaConfig) String() string {
-	return "aura"
 }
 
 // BorConfig is the consensus engine configs for Matic bor based sealing.
