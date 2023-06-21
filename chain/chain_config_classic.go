@@ -106,11 +106,10 @@ func ConfigString_Classic(c *Config) string {
 	custom := strings.Join(entryStrings, ", ")
 
 	engine := c.getEngine()
-	return fmt.Sprintf("{ChainID: %v, Homestead: %v, DAO: %v, DAO Support: %v, Tangerine Whistle: %v, Spurious Dragon: %v, Byzantium: %v, Constantinople: %v, Petersburg: %v, Istanbul: %v, Muir Glacier: %v, Berlin: %v, London: %v, Arrow Glacier: %v, Gray Glacier: %v, Terminal Total Difficulty: %v, Merge Netsplit: %v, Shanghai: %v, Cancun: %v, Engine: %v%s}",
+	return fmt.Sprintf("{ChainID: %v, Homestead: %v, DAO: %v, Tangerine Whistle: %v, Spurious Dragon: %v, Byzantium: %v, Constantinople: %v, Petersburg: %v, Istanbul: %v, Muir Glacier: %v, Berlin: %v, London: %v, Arrow Glacier: %v, Gray Glacier: %v, Terminal Total Difficulty: %v, Merge Netsplit: %v, Shanghai: %v, Cancun: %v, Engine: %v%s}",
 		c.ChainID,
 		c.HomesteadBlock,
 		c.DAOForkBlock,
-		c.DAOForkSupport,
 		c.TangerineWhistleBlock,
 		c.SpuriousDragonBlock,
 		c.ByzantiumBlock,
