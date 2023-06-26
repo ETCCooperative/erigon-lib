@@ -531,7 +531,6 @@ type Rules struct {
 	IsByzantium, IsConstantinople, IsPetersburg, IsIstanbul bool
 	IsBerlin, IsLondon, IsShanghai, IsCancun, IsPrague      bool
 	IsEip1559FeeCollector, IsAura                           bool
-	IsEIP150, IsEIP155                                      bool
 }
 
 // Rules ensures c's ChainID is not nil and returns a new Rules instance
@@ -560,8 +559,6 @@ func (c *Config) Rules(num uint64, time uint64) *Rules {
 		IsPrague:              c.IsPrague(time),
 		IsEip1559FeeCollector: c.IsEip1559FeeCollector(num),
 		IsAura:                c.Aura != nil,
-		IsEIP150:              c.IsTangerineWhistle(num),
-		IsEIP155:              c.IsSpuriousDragon(num),
 	}
 }
 
